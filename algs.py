@@ -111,9 +111,14 @@ def test_adaptive_lr(envs, gamma, episodes, lr = 1e-3):
         policy_params_size = sum(p.numel() for p in policy.parameters())
         value_params_size = sum(p.numel() for p in value.parameters())
 
+
         # remember we also need lr's for the adaptive lr's
-        policy_lrs = Adaptive_LR(policy_params_size)
-        value_lrs = Adaptive_LR(value_params_size)
+        policy_lrs = []
+        value_lrs = []
+        for p in policy.parameters():
+            policy_lrs.append(Adaptive_LR(p.numel()))
+        for p in value.parameters():
+            value_lrs.append(Adaptive_LR(p.numel()))
 
         for episode in range(episodes):
             obs = env.reset()
@@ -144,6 +149,11 @@ def test_adaptive_lr(envs, gamma, episodes, lr = 1e-3):
                 policy.zero_grad()
                 value.zero_grad()
 
+                for lrs in policy_lrs:
+                    lrs.zero_grad()
+                for lrs in value_lrs:
+                    lrs.zero_grad()
+
                 # Idea for updating learning rates:
                     # rates are updated according to squared TD error of NEXT iteration
                     # basically, lrs affect the next time step, so it's natural to make a cost function based on what happens afterwards
@@ -164,21 +174,31 @@ def test_adaptive_lr(envs, gamma, episodes, lr = 1e-3):
 
                 policy_loss.backward(retain_graph = True)
                 value_loss.backward(retain_graph = True)
-                lr_loss.backward()
+
+                if ix > 0:
+                    lr_loss.backward()
 
                 ix += 1 # tracker for discounting
 
 
                 # optimize policy and value function
-                with torch.no_grad():
-                    for ix, param in enum(policy.parameters()):
-                        param -= policy_lrs[ix](torch.cat([param, param.grad])) * param.grad
-                    for ix, param in enum(value.parameters()):
-                        param -= value_lrs[ix](torch.cat([param, param.grad])) * param.grad
-                    for param in policy_lrs.parameters():
-                        param -= lr * param.grad
-                    for param in value_lrs.parameters():
-                        param -= lr * param.grad
+                for ix, param in enumerate(policy.parameters()):
+                    #print(torch.cat([param.view(1, -1), param.grad.view(1, -1)], dim = -1).shape)
+                    weight_and_grad = torch.cat([param.view(1, -1), param.grad.view(1, -1)], dim = -1)
+                    #print(weight_and_grad.shape)
+                    param.data -= torch.mul(policy_lrs[ix](weight_and_grad).view(param.grad.shape), param.grad)
+                for ix, param in enumerate(value.parameters()):
+                    weight_and_grad = torch.cat([param.view(1, -1), param.grad.view(1, -1)], dim = -1)
+                    param.data -= torch.mul(value_lrs[ix](weight_and_grad).view(param.grad.shape), param.grad)
+
+                if ix > 0:
+                    # problem: need require_grad on the params, but we are also updating the params in place
+                    for lrs in policy_lrs:
+                        for param in lrs.parameters():
+                            param.data -= lr * param.grad
+                    for lrs in value_lrs:
+                        for param in lrs.parameters():
+                            param.data -= lr * param.grad
 
             print("total return of {} at end of episode {}".format(final_return, episode + 1))
 
