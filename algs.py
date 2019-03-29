@@ -100,6 +100,70 @@ class Value(nn.Module):
     def forward(self, x):
         return self.layers(x)
 
+def vanilla_actor_critic(env, gamma, episodes, lr = 1e-3):
+    dim_action = env.action_space.n
+    dim_state = env.observation_space.shape[0]
+
+    policy = Policy(dim_state, dim_action)
+    value = Value(dim_state)
+
+    policy_optim = torch.optim.SGD(policy.parameters(), lr = lr)
+    value_optim = torch.optim.SGD(value.parameters(), lr = lr)
+
+    returns = [] # holds returns for each episode
+
+    for episode in range(episodes):
+        obs = env.reset()
+        done = False
+
+        #prev_TD_error = None
+
+        ix = 0
+        final_return = 0
+
+        #last_td_error = torch.Tensor([0]).to(device)
+
+        while done != True:
+            env.render()
+
+            log_probs = policy(torch.Tensor(obs).to(device))
+            m = Categorical(logits = log_probs)
+            #print("time = {}".format(t), log_probs, obs)
+            action = m.sample()
+
+            prev_value = value(torch.Tensor(obs).to(device))
+            prev_obs = torch.Tensor(obs).to(device)
+
+            obs, reward, done, info = env.step(action.item())
+
+            obs = torch.Tensor(obs).to(device)
+
+
+            final_return += reward * (gamma ** ix)
+
+
+            # zero grad again because we used them in the simulation
+            policy_optim.zero_grad()
+            value_optim.zero_grad()
+
+            delta = reward + gamma * value(obs).detach() - value(prev_obs).detach()
+            policy_loss = -(gamma ** ix) * delta * m.log_prob(action)
+            value_loss = delta * value(torch.Tensor(prev_obs).to(device))
+
+
+            policy_loss.backward(retain_graph = True)
+            value_loss.backward()
+
+            ix += 1 # tracker for discounting
+
+
+            policy_optim.step()
+            value_optim.step()
+
+        #print("total return of {} at end of episode {}".format(final_return, episode + 1))
+        returns.append(final_return)
+    return returns
+
 
 def test_adaptive_lr(env, gamma, episodes, lr = 1e-3):
     dim_action = env.action_space.n
@@ -254,7 +318,7 @@ def test_adaptive_lr(env, gamma, episodes, lr = 1e-3):
             for lrs in value_lrs:
                 lrs.zero_grad()
 
-            delta = reward + gamma * value(torch.Tensor(obs).to(device)).detach() - prev_value.detach()
+            delta = reward + gamma * value(obs).detach() - value(prev_obs).detach()
             policy_loss = -(gamma ** ix) * delta * m.log_prob(action)
             value_loss = delta * value(torch.Tensor(prev_obs).to(device))
 
@@ -280,7 +344,8 @@ def test_adaptive_lr(env, gamma, episodes, lr = 1e-3):
                     #print(torch.cat([param.view(1, -1), param.grad.view(1, -1)], dim = -1).shape)
                     weight_and_grad = torch.cat([param.view(1, -1), param.grad.view(1, -1)], dim = -1)
                     #print(weight_and_grad.shape)
-                    param.data -= torch.mul(policy_lrs[ix](weight_and_grad).view(param.grad.shape), param.grad)
+                    #param.data -= torch.mul(policy_lrs[ix](weight_and_grad).view(param.grad.shape), param.grad)
+                    param -= lr * param.grad
                 for ix, param in enumerate(value.parameters()):
                     weight_and_grad = torch.cat([param.view(1, -1), param.grad.view(1, -1)], dim = -1)
                     param.data -= torch.mul(value_lrs[ix](weight_and_grad).view(param.grad.shape), param.grad)
@@ -296,7 +361,7 @@ def test_adaptive_lr(env, gamma, episodes, lr = 1e-3):
                     for param in lrs.parameters():
                         param.data -= lr * param.grad"""
 
-        print("total return of {} at end of episode {}".format(final_return, episode + 1))
+        #print("total return of {} at end of episode {}".format(final_return, episode + 1))
         returns.append(final_return)
     return returns
 
