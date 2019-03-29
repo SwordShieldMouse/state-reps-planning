@@ -6,7 +6,7 @@ envs = [env]
 
 ## we will try to product the next state of the cart pole given the current state and the action taken
 episodes = 50
-trials = 10
+trials = 20
 gamma = 0.99
 n_predictions = 10
 lr = 1e-4
@@ -14,8 +14,8 @@ lr = 1e-4
 returns = {"fixed-lr": [], "modification": [], "episode": [], "return": []}
 episode_ixs = [i + 1 for i in range(episodes)]
 
-for modification in ("none", "adaptive_lr"):
-    print("working on {}".format(modification))
+for modification in ("adaptive_lr", "none"):
+    print("working on modification = {}".format(modification))
     for trial in range(trials):
         print("starting trial {}".format(trial + 1))
 

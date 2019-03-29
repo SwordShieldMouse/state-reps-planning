@@ -118,7 +118,7 @@ def vanilla_actor_critic(env, gamma, episodes, lr = 1e-3):
 
         #prev_TD_error = None
 
-        ix = 0
+        timestep = 0
         final_return = 0
 
         #last_td_error = torch.Tensor([0]).to(device)
@@ -139,7 +139,7 @@ def vanilla_actor_critic(env, gamma, episodes, lr = 1e-3):
             obs = torch.Tensor(obs).to(device)
 
 
-            final_return += reward * (gamma ** ix)
+            final_return += reward * (gamma ** timestep)
 
 
             # zero grad again because we used them in the simulation
@@ -147,14 +147,14 @@ def vanilla_actor_critic(env, gamma, episodes, lr = 1e-3):
             value_optim.zero_grad()
 
             delta = reward + gamma * value(obs).detach() - value(prev_obs).detach()
-            policy_loss = -(gamma ** ix) * delta * m.log_prob(action)
-            value_loss = delta * value(torch.Tensor(prev_obs).to(device))
+            policy_loss = -(gamma ** timestep) * delta * m.log_prob(action)
+            value_loss = -delta * value(torch.Tensor(prev_obs).to(device))
 
 
             policy_loss.backward(retain_graph = True)
             value_loss.backward()
 
-            ix += 1 # tracker for discounting
+            timestep += 1 # tracker for discounting
 
 
             policy_optim.step()
@@ -193,16 +193,14 @@ def test_adaptive_lr(env, gamma, episodes, lr = 1e-3):
     for p in value.parameters():
         value_lrs.append(Adaptive_LR(p.numel()))
 
+    adaptive_lr_sample = {"episode": [], "index": [], "param_name": [], "lr": []} # holds an adaptive lr as it evolves through the episodes; for evaluation
+
     for episode in range(episodes):
         obs = env.reset()
         done = False
 
-        #prev_TD_error = None
-
-        ix = 0
+        timestep = 0
         final_return = 0
-
-        #last_td_error = torch.Tensor([0]).to(device)
 
         while done != True:
             env.render()
@@ -220,7 +218,7 @@ def test_adaptive_lr(env, gamma, episodes, lr = 1e-3):
             obs = torch.Tensor(obs).to(device)
 
 
-            final_return += reward * (gamma ** ix)
+            final_return += reward * (gamma ** timestep)
 
             policy.zero_grad()
             value.zero_grad()
@@ -251,25 +249,10 @@ def test_adaptive_lr(env, gamma, episodes, lr = 1e-3):
 
             # update the simulation networks with the gradient of the current TD error
             # save the resulting params into tensors and later we use them in getting the TD error
-            policy_grads = []
-            policy_params = []
+
             value_params = []
             value_grads = []
-            #for ix, param in enumerate(policy.parameters()):
-                #print(torch.cat([param.view(1, -1), param.grad.view(1, -1)], dim = -1).shape)
-                #weight_and_grad = torch.cat([param.view(1, -1), list(policy.parameters())[ix].grad.view(1, -1)], dim = -1)
-                #print(weight_and_grad.shape)
-                #param.requires_grad = True
-                #param = list(policy.parameters())[ix] - torch.mul(policy_lrs[ix](weight_and_grad).view(list(policy.parameters())[ix].grad.shape), list(policy.parameters())[ix].grad)
-                #policy_tensors.append(param)
-            #    policy_grads.append(param.grad)
-            #    policy_params.append(param.data)
             for ix, param in enumerate(value.parameters()):
-                #weight_and_grad = torch.cat([param.view(1, -1), list(value.parameters())[ix].grad.view(1, -1)], dim = -1)
-                #print(weight_and_grad.shape)
-                #param.requires_grad = True
-                #param = list(value.parameters())[ix] - torch.mul(value_lrs[ix](weight_and_grad).view(list(value.parameters())[ix].grad.shape), list(value.parameters())[ix].grad)
-                #value_tensors.append(param)
                 value_grads.append(param.grad)
                 value_params.append(param.data)
             #print(value_grads)
@@ -283,10 +266,7 @@ def test_adaptive_lr(env, gamma, episodes, lr = 1e-3):
 
             # losses of the simulation
             # TD loss is (r + gamma * (v(curr_state, old_weight) - alpha(old_weight, grad) * grad * curr_state) - (v(old_state, old_weight) - alpha(old_weight, grad) * grad * old_state)
-            #print(value_tensors)
-            #print(torch.dot(value_tensors[0][0], torch.Tensor(prev_obs)))
-            #print(sim_value(torch.Tensor(prev_obs).to(device)))
-            #sim_policy_loss = -(gamma ** ix) * sim_delta * sim_m.log_prob(action)
+
             param_and_grad0 = torch.cat([value_params[0], value_grads[0]], dim = -1)
             param_and_grad1 = torch.cat([value_params[1], value_grads[1]], dim = -1)
 
@@ -304,6 +284,7 @@ def test_adaptive_lr(env, gamma, episodes, lr = 1e-3):
                     for param in lrs.parameters():
                         #print(lr)
                         param -= lr * param.grad
+                        #print(param[0].detach().numpy()[0])
                 #for lrs in policy_lrs:
                 #    for param in lrs.parameters():
                 #        param -= lr * param.grad
@@ -319,15 +300,8 @@ def test_adaptive_lr(env, gamma, episodes, lr = 1e-3):
                 lrs.zero_grad()
 
             delta = reward + gamma * value(obs).detach() - value(prev_obs).detach()
-            policy_loss = -(gamma ** ix) * delta * m.log_prob(action)
-            value_loss = delta * value(torch.Tensor(prev_obs).to(device))
-
-
-            # TD-error gives us an idea of where we should have had the previous step-sizes
-            #lr_loss = last_td_error ** 2
-
-            # need to keep track of this since we want to optimize the lr for the next iteration based on the actual TD error and not the one calculated with already updated weights
-            #last_td_error = reward + gamma * value(torch.Tensor(obs).to(device)) - prev_value.clone()
+            policy_loss = -(gamma ** timestep) * delta * m.log_prob(action)
+            value_loss = -delta * value(torch.Tensor(prev_obs).to(device))
 
             policy_loss.backward(retain_graph = True)
             value_loss.backward()
@@ -335,7 +309,7 @@ def test_adaptive_lr(env, gamma, episodes, lr = 1e-3):
             #if ix > 0:
             #    lr_loss.backward()
 
-            ix += 1 # tracker for discounting
+            timestep += 1 # tracker for discounting
 
 
             # optimize policy and value function
@@ -346,23 +320,27 @@ def test_adaptive_lr(env, gamma, episodes, lr = 1e-3):
                     #print(weight_and_grad.shape)
                     #param.data -= torch.mul(policy_lrs[ix](weight_and_grad).view(param.grad.shape), param.grad)
                     param -= lr * param.grad
-                for ix, param in enumerate(value.parameters()):
+                for ix, (name, param) in enumerate(value.named_parameters()):
                     weight_and_grad = torch.cat([param.view(1, -1), param.grad.view(1, -1)], dim = -1)
                     param.data -= torch.mul(value_lrs[ix](weight_and_grad).view(param.grad.shape), param.grad)
+                    #print(value_lrs[ix](weight_and_grad)[0].detach().numpy()[0])
+                    for lr_ix, lr in enumerate(value_lrs[ix](weight_and_grad)[0].detach().numpy()):
+                        adaptive_lr_sample["param_name"].append(name)
+                        adaptive_lr_sample["index"].append(lr_ix)
+                        adaptive_lr_sample["lr"].append(lr)
+                        adaptive_lr_sample["episode"].append(episode)
+                    #adaptive_lr_sample[ix].append(value_lrs[ix](weight_and_grad)[0].detach().numpy()[0])
+                    #adaptive_lr_sample[name].append(name)
 
-
-            # simulate
-            """if ix > 0:
-                # problem: need require_grad on the params, but we are also updating the params in place
-                for lrs in policy_lrs:
-                    for param in lrs.parameters():
-                        param.data -= lr * param.grad
-                for lrs in value_lrs:
-                    for param in lrs.parameters():
-                        param.data -= lr * param.grad"""
 
         #print("total return of {} at end of episode {}".format(final_return, episode + 1))
         returns.append(final_return)
+    df = pd.DataFrame(adaptive_lr_sample)
+    #print(df)
+
+    ## uncomment the following to plot the lr's 
+    #seaborn.lineplot(x = "episode", y = "lr", style = "param_name", hue = "index", data = df, legend = "full")
+    #plt.show()
     return returns
 
 def train_prediction(env, gamma, n_predictions, episodes):
