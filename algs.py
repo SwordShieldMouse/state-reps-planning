@@ -61,6 +61,7 @@ class Predict(nn.Module):
 class Adaptive_LR(nn.Module):
     # gives a array of learning rates, one for each weight considered
     def __init__(self, wgt_size):
+        # mb should combined LR and policy into one network that is trained?
         # lr should depend on current weights and gradient of whatever function we are minimizing, at the current state
         super(Adaptive_LR, self).__init__()
 
@@ -100,88 +101,181 @@ class Value(nn.Module):
         return self.layers(x)
 
 
-def test_adaptive_lr(envs, gamma, episodes, lr = 1e-3):
-    for env in envs:
-        dim_action = env.action_space.n
-        dim_state = env.observation_space.shape[0]
+def test_adaptive_lr(env, gamma, episodes, lr = 1e-3):
+    dim_action = env.action_space.n
+    dim_state = env.observation_space.shape[0]
 
-        policy = Policy(dim_state, dim_action)
-        value = Value(dim_state)
-        # need a learning rate for every parameter in each model
-        policy_params_size = sum(p.numel() for p in policy.parameters())
-        value_params_size = sum(p.numel() for p in value.parameters())
+    policy = Policy(dim_state, dim_action)
+    value = Value(dim_state)
+
+    sim_policy = Policy(dim_state, dim_action)
+    sim_value = Value(dim_state)
+
+    # make sure weights of sim and not are the same
+    sim_policy.load_state_dict(policy.state_dict())
+    sim_value.load_state_dict(value.state_dict())
+
+    # need a learning rate for every parameter in each model
+    policy_params_size = sum(p.numel() for p in policy.parameters())
+    value_params_size = sum(p.numel() for p in value.parameters())
+
+    returns = [] # holds returns for each episode
+
+    # remember we also need lr's for the adaptive lr's
+    policy_lrs = []
+    value_lrs = []
+    for p in policy.parameters():
+        policy_lrs.append(Adaptive_LR(p.numel()))
+    for p in value.parameters():
+        value_lrs.append(Adaptive_LR(p.numel()))
+
+    for episode in range(episodes):
+        obs = env.reset()
+        done = False
+
+        #prev_TD_error = None
+
+        ix = 0
+        final_return = 0
+
+        #last_td_error = torch.Tensor([0]).to(device)
+
+        while done != True:
+            env.render()
+
+            log_probs = policy(torch.Tensor(obs).to(device))
+            m = Categorical(logits = log_probs)
+            #print("time = {}".format(t), log_probs, obs)
+            action = m.sample()
+
+            prev_value = value(torch.Tensor(obs).to(device))
+            prev_obs = torch.Tensor(obs).to(device)
+
+            obs, reward, done, info = env.step(action.item())
+
+            obs = torch.Tensor(obs).to(device)
 
 
-        # remember we also need lr's for the adaptive lr's
-        policy_lrs = []
-        value_lrs = []
-        for p in policy.parameters():
-            policy_lrs.append(Adaptive_LR(p.numel()))
-        for p in value.parameters():
-            value_lrs.append(Adaptive_LR(p.numel()))
+            final_return += reward * (gamma ** ix)
 
-        for episode in range(episodes):
-            obs = env.reset()
-            done = False
+            policy.zero_grad()
+            value.zero_grad()
 
-            prev_TD_error = None
+            for lrs in policy_lrs:
+                lrs.zero_grad()
+            for lrs in value_lrs:
+                lrs.zero_grad()
 
-            ix = 0
-            final_return = 0
+            # Idea for updating learning rates:
+                # rates are updated according to squared TD error of NEXT iteration
+                # basically, lrs affect the next time step, so it's natural to make a cost function based on what happens afterwards
+                # essentially, we are minimizing an expected TD error, where the states are drawn from the usual state distribution and the time subscripts are also drawn from a distribution
+                # so at each iteration, we first optimize the step-sizes with respect to the TD-error from the last time step
+                # this is essentially a line search
+                # does it make sense to do this with a trust region?
+            # if we had a planner, we could optimize step-sizes so that the TD error of the next state/action is minimized
 
-            last_td_error = torch.Tensor([0]).to(device)
+            # before we actually update our policy and value weights, simulate an update with our variable step-sizes to the policy and value, and see what the TD-error is one the next iteration, with the same states. Run descent on this squared TD error to optimize the variable step-sizes before we do anything tot he value and policy weights.
 
-            while done != True:
-                env.render()
+            # simulated update according to current TD-error
+            sim_delta = reward + gamma * value(torch.Tensor(obs).to(device)).detach() - prev_value.detach() # detach since we do semi-gradient TD
+            #sim_policy_loss = -(gamma ** ix) * sim_delta * m.log_prob(action)
+            sim_value_loss = sim_delta * value(torch.Tensor(prev_obs).to(device))
 
-                log_probs = policy(torch.Tensor(obs).to(device))
-                m = Categorical(logits = log_probs)
-                #print("time = {}".format(t), log_probs, obs)
-                action = m.sample()
+            #sim_policy_loss.backward()
+            sim_value_loss.backward()
 
-                prev_value = value(torch.Tensor(obs).to(device))
-                prev_obs = obs
+            # update the simulation networks with the gradient of the current TD error
+            # save the resulting params into tensors and later we use them in getting the TD error
+            policy_grads = []
+            policy_params = []
+            value_params = []
+            value_grads = []
+            #for ix, param in enumerate(policy.parameters()):
+                #print(torch.cat([param.view(1, -1), param.grad.view(1, -1)], dim = -1).shape)
+                #weight_and_grad = torch.cat([param.view(1, -1), list(policy.parameters())[ix].grad.view(1, -1)], dim = -1)
+                #print(weight_and_grad.shape)
+                #param.requires_grad = True
+                #param = list(policy.parameters())[ix] - torch.mul(policy_lrs[ix](weight_and_grad).view(list(policy.parameters())[ix].grad.shape), list(policy.parameters())[ix].grad)
+                #policy_tensors.append(param)
+            #    policy_grads.append(param.grad)
+            #    policy_params.append(param.data)
+            for ix, param in enumerate(value.parameters()):
+                #weight_and_grad = torch.cat([param.view(1, -1), list(value.parameters())[ix].grad.view(1, -1)], dim = -1)
+                #print(weight_and_grad.shape)
+                #param.requires_grad = True
+                #param = list(value.parameters())[ix] - torch.mul(value_lrs[ix](weight_and_grad).view(list(value.parameters())[ix].grad.shape), list(value.parameters())[ix].grad)
+                #value_tensors.append(param)
+                value_grads.append(param.grad)
+                value_params.append(param.data)
+            #print(value_grads)
+            # get the TD error of the simulation
+            sim_delta = reward + gamma * sim_value(obs).detach() - sim_value(prev_obs).detach() # detach since we do semi-gradient TD
+            # need to reroll probability
+                # complication: have now updated the policy, but action was taken with respect to previous policy
+                # do we use the log prob of the simulated policy assuming this action was taken?
+            sim_log_probs = sim_policy(prev_obs)
+            sim_m = Categorical(logits = sim_log_probs)
 
-                obs, reward, done, info = env.step(action.item())
+            # losses of the simulation
+            # TD loss is (r + gamma * (v(curr_state, old_weight) - alpha(old_weight, grad) * grad * curr_state) - (v(old_state, old_weight) - alpha(old_weight, grad) * grad * old_state)
+            #print(value_tensors)
+            #print(torch.dot(value_tensors[0][0], torch.Tensor(prev_obs)))
+            #print(sim_value(torch.Tensor(prev_obs).to(device)))
+            #sim_policy_loss = -(gamma ** ix) * sim_delta * sim_m.log_prob(action)
+            param_and_grad0 = torch.cat([value_params[0], value_grads[0]], dim = -1)
+            param_and_grad1 = torch.cat([value_params[1], value_grads[1]], dim = -1)
 
-                final_return += reward * (gamma ** ix)
+            #print(torch.mul(value_lrs[0](param_and_grad0), value_grads[0]).shape)
 
-                policy.zero_grad()
-                value.zero_grad()
+            updated_value_curr = torch.dot( torch.mul(value_lrs[0](param_and_grad0), value_grads[0])[0], obs ) + torch.mul(value_lrs[1](param_and_grad1), value_grads[1])
+            updated_value_prev = torch.dot( torch.mul(value_lrs[0](param_and_grad0), value_grads[0])[0], prev_obs ) + torch.mul(value_lrs[1](param_and_grad1), value_grads[1])
+            sim_value_loss = (reward + gamma * (value(obs).detach() - updated_value_curr) - (value(prev_obs).detach() - updated_value_prev))
 
-                for lrs in policy_lrs:
-                    lrs.zero_grad()
+            #sim_policy_loss.backward(retain_graph = True)
+            sim_value_loss.backward()
+            # gradient step of the step-sizes
+            with torch.no_grad():
                 for lrs in value_lrs:
-                    lrs.zero_grad()
+                    for param in lrs.parameters():
+                        #print(lr)
+                        param -= lr * param.grad
+                #for lrs in policy_lrs:
+                #    for param in lrs.parameters():
+                #        param -= lr * param.grad
 
-                # Idea for updating learning rates:
-                    # rates are updated according to squared TD error of NEXT iteration
-                    # basically, lrs affect the next time step, so it's natural to make a cost function based on what happens afterwards
-                    # essentially, we are minimizing an expected TD error, where the states are drawn from the usual state distribution and the time subscripts are also drawn from a distribution
-                    # so at each iteration, we first optimize the step-sizes with respect to the TD-error from the last time step
+            # zero grad again because we used them in the simulation
+            policy.zero_grad()
+            value.zero_grad()
 
-                # actor-critic
-                delta = reward + gamma * value(torch.Tensor(obs).to(device)).detach() - prev_value.detach() # detach since we do semi-gradient TD
-                policy_loss = -(gamma ** ix) * delta * m.log_prob(action)
-                value_loss = delta * value(torch.Tensor(prev_obs).to(device))
+            # zero all lr grads
+            for lrs in policy_lrs:
+                lrs.zero_grad()
+            for lrs in value_lrs:
+                lrs.zero_grad()
 
-
-                # TD-error gives us an idea of where we should have had the previous step-sizes
-                lr_loss = last_td_error ** 2
-
-                # need to keep track of this since we want to optimize the lr for the next iteration based on the actual TD error and not the one calculated with already updated weights
-                last_td_error = reward + gamma * value(torch.Tensor(obs).to(device)) - prev_value.clone()
-
-                policy_loss.backward(retain_graph = True)
-                value_loss.backward(retain_graph = True)
-
-                if ix > 0:
-                    lr_loss.backward()
-
-                ix += 1 # tracker for discounting
+            delta = reward + gamma * value(torch.Tensor(obs).to(device)).detach() - prev_value.detach()
+            policy_loss = -(gamma ** ix) * delta * m.log_prob(action)
+            value_loss = delta * value(torch.Tensor(prev_obs).to(device))
 
 
-                # optimize policy and value function
+            # TD-error gives us an idea of where we should have had the previous step-sizes
+            #lr_loss = last_td_error ** 2
+
+            # need to keep track of this since we want to optimize the lr for the next iteration based on the actual TD error and not the one calculated with already updated weights
+            #last_td_error = reward + gamma * value(torch.Tensor(obs).to(device)) - prev_value.clone()
+
+            policy_loss.backward(retain_graph = True)
+            value_loss.backward()
+
+            #if ix > 0:
+            #    lr_loss.backward()
+
+            ix += 1 # tracker for discounting
+
+
+            # optimize policy and value function
+            with torch.no_grad():
                 for ix, param in enumerate(policy.parameters()):
                     #print(torch.cat([param.view(1, -1), param.grad.view(1, -1)], dim = -1).shape)
                     weight_and_grad = torch.cat([param.view(1, -1), param.grad.view(1, -1)], dim = -1)
@@ -191,16 +285,20 @@ def test_adaptive_lr(envs, gamma, episodes, lr = 1e-3):
                     weight_and_grad = torch.cat([param.view(1, -1), param.grad.view(1, -1)], dim = -1)
                     param.data -= torch.mul(value_lrs[ix](weight_and_grad).view(param.grad.shape), param.grad)
 
-                if ix > 0:
-                    # problem: need require_grad on the params, but we are also updating the params in place
-                    for lrs in policy_lrs:
-                        for param in lrs.parameters():
-                            param.data -= lr * param.grad
-                    for lrs in value_lrs:
-                        for param in lrs.parameters():
-                            param.data -= lr * param.grad
 
-            print("total return of {} at end of episode {}".format(final_return, episode + 1))
+            # simulate
+            """if ix > 0:
+                # problem: need require_grad on the params, but we are also updating the params in place
+                for lrs in policy_lrs:
+                    for param in lrs.parameters():
+                        param.data -= lr * param.grad
+                for lrs in value_lrs:
+                    for param in lrs.parameters():
+                        param.data -= lr * param.grad"""
+
+        print("total return of {} at end of episode {}".format(final_return, episode + 1))
+        returns.append(final_return)
+    return returns
 
 def train_prediction(env, gamma, n_predictions, episodes):
     # how do we evaluate whether our predictions are good?
