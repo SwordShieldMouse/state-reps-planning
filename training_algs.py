@@ -26,7 +26,7 @@ def train_time_gvf(env, gamma, lr, episodes):
 
     # just use a fixed policy for now
     # TODO: in the future find way to make this adaptive
-    gvf = Value(dim_state)
+    gvf = Time_GVF(dim_state)
     gvf_optim = torch.optim.SGD(gvf.parameters(), lr = lr)
 
     policy = Policy(dim_state, dim_action)
@@ -61,10 +61,9 @@ def train_time_gvf(env, gamma, lr, episodes):
         while done != True:
             env.render()
 
-            if episode == episodes - 1:
-                gvf_assess["episode"].append(episode)
-                gvf_assess["gvf_pred"].append(gvf(obs).detach().item())
-                gvf_assess["timestep"].append(timestep)
+            gvf_assess["episode"].append(episode)
+            gvf_assess["gvf_pred"].append(gvf(obs).detach().item())
+            gvf_assess["timestep"].append(timestep)
 
             log_probs = policy(obs)
             m = Categorical(logits = log_probs)
@@ -84,10 +83,9 @@ def train_time_gvf(env, gamma, lr, episodes):
             final_return += reward * (gamma ** timestep)
             timestep += 1
 
-        if episode == episodes - 1:
-            gvf_assess["episode"].append(episode)
-            gvf_assess["gvf_pred"].append(gvf(obs).detach().item())
-            gvf_assess["timestep"].append(timestep)
+        gvf_assess["episode"].append(episode)
+        gvf_assess["gvf_pred"].append(gvf(obs).detach().item())
+        gvf_assess["timestep"].append(timestep)
         # REINFORCE
         for i in range(len(actions)):
             # optimize policy
@@ -131,9 +129,9 @@ def train_time_gvf(env, gamma, lr, episodes):
         returns.append(final_return)
 
     # show combined plots of accuracy of gvf
-    gvf_access = pd.DataFrame(gvf_access)
-    seaborn.lineplot(x = "timestep", y = "gvf_pred", data = gvf_assess.loc[episode == episodes - 1, : ], label = "gvf")
-    seaborn.lineplot(x = "timestep", y = "true_time", data = gvf_assess.loc[episode == episodes - 1, : ], label = "truth")
+    gvf_assess = pd.DataFrame(gvf_assess)
+    seaborn.lineplot(x = "timestep", y = "gvf_pred", data = gvf_assess.loc[gvf_assess["episode"] == episode - 1], label = "gvf")
+    seaborn.lineplot(x = "timestep", y = "true_time", data = gvf_assess.loc[gvf_assess["episode"] == episode - 1], label = "truth")
     plt.show()
     return returns
 

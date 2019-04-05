@@ -122,3 +122,19 @@ class Value(nn.Module):
 
     def forward(self, x):
         return self.layers(x)
+
+class Time_GVF(nn.Module):
+    # predicts the time till an event
+    # should be positive
+    def __init__(self, dim_state):
+        super(Time_GVF, self).__init__()
+
+        self.layers = nn.Sequential(
+            nn.Linear(dim_state, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
+            nn.ReLU()
+        )
+
+    def forward(self, x):
+        return self.layers(x)
