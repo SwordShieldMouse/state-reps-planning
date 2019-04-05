@@ -17,6 +17,128 @@ def aggregate_gvfs(gvfs, obs):
     # returns a tensor that is obs applied to each element of gvfs
     return torch.Tensor([gvf(obs) for gvf in gvfs]).to(device)
 
+def train_time_gvf(env, gamma, lr, episodes):
+    dim_action = env.action_space.n
+    dim_state = env.observation_space.shape[0]
+
+    # only learn one GVF: from a state and given an action, predict the time until failure/episode ending (basically predicts falling)
+    # will have to be monte carlo method, or at least that is most reliable
+
+    # just use a fixed policy for now
+    # TODO: in the future find way to make this adaptive
+    gvf = Value(dim_state)
+    gvf_optim = torch.optim.SGD(gvf.parameters(), lr = lr)
+
+    policy = Policy(dim_state, dim_action)
+    policy_optim = torch.optim.SGD(policy.parameters(), lr = lr)
+
+
+    # termination factor is just 1 unless we are at a terminal state
+
+    returns = []
+
+    # for assessing accuracy of gvf later
+    gvf_assess = {"episode": [], "gvf_pred": [], "true_time": [], "timestep": []}
+
+    # for plots
+    fig = plt.figure(figsize = (15, 10))
+
+
+    for episode in range(episodes):
+
+        obs = torch.Tensor(env.reset()).to(device)
+        done = False
+
+        # cumulant is timestep
+        timestep = 0
+
+        final_return = 0
+
+        actions = []
+        rewards = []
+        states = [torch.Tensor(obs).to(device)]
+
+        while done != True:
+            env.render()
+
+            if episode == episodes - 1:
+                gvf_assess["episode"].append(episode)
+                gvf_assess["gvf_pred"].append(gvf(obs).detach().item())
+                gvf_assess["timestep"].append(timestep)
+
+            log_probs = policy(obs)
+            m = Categorical(logits = log_probs)
+            action = m.sample()
+
+            prev_obs = torch.Tensor(obs).to(device)
+
+            obs, reward, done, info = env.step(action.item())
+
+            rewards.append(reward)
+            actions.append(action.item())
+
+            obs = torch.Tensor(obs).to(device)
+
+            states.append(obs)
+
+            final_return += reward * (gamma ** timestep)
+            timestep += 1
+
+        if episode == episodes - 1:
+            gvf_assess["episode"].append(episode)
+            gvf_assess["gvf_pred"].append(gvf(obs).detach().item())
+            gvf_assess["timestep"].append(timestep)
+        # REINFORCE
+        for i in range(len(actions)):
+            # optimize policy
+            """G = 0
+            if i <= len(rewards) - 1:
+                G = sum([(gamma ** j) * rewards[j] for j in range(i, len(rewards))])
+
+            # don't need to use log since we already output logits
+            elig_vec = policy(states[i])[actions[i]] # evaluate the gradient with the current params
+
+            loss = -G * elig_vec
+            #assert np.isnan(G.detach()) == False, "G is nan"
+            #assert torch.sum(torch.isnan(elig_vec)) == 0, "elig vec is nan"
+            #assert np.isnan(loss.detach()) == False, "loss is nan"
+            policy_optim.zero_grad()
+            if i + 1 == len(actions):
+                loss.backward()
+            else:
+                loss.backward(retain_graph = True)
+            policy_optim.step()"""
+
+        # optimize GVF
+        # recall cumulant is just 1 at non-terminal state
+        # termination factor is 1 until we hit a terminal state, so the return is given below
+        # for each state in the buffer, the return at that stage is simply len(buffer) - 1 - index of state since the terminal state is in the buffer
+        cumulants = [len(states) - 1 - ix for ix in range(len(states))]
+
+        gvf_assess["true_time"] += cumulants
+
+        # possible problem: cumulants can grow very large. can we normalize?
+        for i in range(len(states)):
+            gvf_optim.zero_grad()
+            delta = cumulants[i] - gvf(states[i]).detach()
+            loss = -delta * gvf(states[i])
+            loss.backward()
+            gvf_optim.step()
+
+        # plot accuracy of gvf for final episode
+
+        #plt.show()
+        returns.append(final_return)
+
+    # show combined plots of accuracy of gvf
+    gvf_access = pd.DataFrame(gvf_access)
+    seaborn.lineplot(x = "timestep", y = "gvf_pred", data = gvf_assess.loc[episode == episodes - 1, : ], label = "gvf")
+    seaborn.lineplot(x = "timestep", y = "true_time", data = gvf_assess.loc[episode == episodes - 1, : ], label = "truth")
+    plt.show()
+    return returns
+
+
+
 def train_gvf(env, gamma, lambda_t, episodes, lr):
     dim_action = env.action_space.n
     dim_state = env.observation_space.shape[0]
@@ -28,9 +150,10 @@ def train_gvf(env, gamma, lambda_t, episodes, lr):
     cumulants = [Cumulant(dim_state, dim_action) for i in range(dim_state)]
     gvf_optims = [torch.optim.SGD(gvfs[i].parameters(), lr = lr) for i in range(dim_state)]
 
+    # try a general value function network (RNN with GVFs?)
     gvf = Value(dim_state)
     termination = Termination(dim_state)
-    cumulant = Cumulant(dim_state, dim_action)
+    cumulant = Cumulant(dim_state, dim_action) # also try features themselves as cumulants
     policy = Policy(dim_state, dim_action)
 
     policy_optim = torch.optim.SGD(policy.parameters(), lr = lr)
@@ -56,6 +179,10 @@ def train_gvf(env, gamma, lambda_t, episodes, lr):
         while done != True:
             env.render()
 
+            # QUESTION: Is there some way to only use gvf's that have been determined to be accurate?
+                # regularization?
+
+            # how to determine accuracy of a GVF?
             log_probs = policy(aggregate_gvfs(gvfs, obs))
             m = Categorical(logits = log_probs)
             action = m.sample()

@@ -19,10 +19,8 @@ class Tree():
         if parent != None:
             self.parent = parent
 
-## TODO: implements a PSR
-class PSR():
-    def __init__(self, q):
-        self.q = q
+
+# RNN for state representation of observations
 
 
 ## For GVFs
