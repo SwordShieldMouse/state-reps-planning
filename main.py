@@ -6,7 +6,7 @@ env = gym.make("CartPole-v0")
 envs = [env]
 
 ## we will try to product the next state of the cart pole given the current state and the action taken
-episodes = 300
+episodes = 500
 trials = 5
 gamma = 0.99
 lambda_t = 0.5
@@ -26,7 +26,7 @@ if RUN_GVF == True:
         for trial in range(trials):
             print("starting trial {}".format(trial + 1))
 
-            gvf_returns["return"] += train_time_gvf(env = env, gamma = gamma, episodes = episodes, lr = lr)
+            gvf_returns["return"] += train_off_policy_gvf(env = env, gamma = gamma, episodes = episodes, lr = lr)
             gvf_returns["episode"] += episode_ixs
             #returns["modification"] += [modification] * episodes
             gvf_returns["lr"] += [lr] * episodes

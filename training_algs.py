@@ -1,7 +1,7 @@
 from includes import *
 from algs import *
 
-def gvf_update(optim, gvf, cumulant, termination, obs, action, prev_obs, lambda_t, prev_z):
+def gvf_trace_update(optim, gvf, cumulant, termination, obs, action, prev_obs, lambda_t, prev_z):
     optim.zero_grad()
     delta = cumulant(obs, action) + (1 - termination(obs).detach()) * gvf(obs).detach() - gvf(prev_obs).detach()
     #z = (1 - termination(obs).detach()) * lambda_t * prev_z + gvf(obs)
@@ -13,9 +13,116 @@ def gvf_update(optim, gvf, cumulant, termination, obs, action, prev_obs, lambda_
 
     return z.detach()
 
+def gvf_off_policy_update(optim, gvf, cumulant, termination, obs, action, prev_obs, importance_ratio = 1):
+    optim.zero_grad()
+    delta = cumulant + (1 - termination) * gvf(obs).detach() - gvf(prev_obs).detach()
+    loss = -importance_ratio * delta * gvf(obs)
+    loss.backward()
+
+    optim.step()
+
 def aggregate_gvfs(gvfs, obs):
     # returns a tensor that is obs applied to each element of gvfs
     return torch.Tensor([gvf(obs) for gvf in gvfs]).to(device)
+
+def train_off_policy_gvf(env, gamma, lr, episodes):
+    dim_action = env.action_space.n
+    dim_state = env.observation_space.shape[0]
+
+    # off-policy
+    # learning multiple target policies from one behaviour policy
+    # the target policies are the policies for GVFs, which are then used as features for the behaviour policy
+
+    random_policy = Policy(dim_state, dim_action)
+    random_gvf = Time_GVF(dim_state) # gvf corresponding to random policy
+    random_gvf_optim = torch.optim.SGD(random_gvf.parameters(), lr = lr)
+
+    left_gvf = Time_GVF(dim_state) # GVF for policy of going left
+    left_gvf_optim = torch.optim.SGD(left_gvf.parameters(), lr = lr)
+
+    right_gvf = Time_GVF(dim_state) # GVF for policy of going right
+    right_gvf_optim = torch.optim.SGD(right_gvf.parameters(), lr = lr)
+
+
+    policy = Policy(dim_state, dim_action)
+    policy_optim = torch.optim.SGD(policy.parameters(), lr = lr)
+
+
+    # termination factor is just 0 unless we are at a terminal state
+    returns = []
+
+
+
+    for episode in range(episodes):
+        obs = torch.Tensor(env.reset()).to(device)
+        done = False
+
+        # cumulant is timestep
+        timestep = 0
+
+        final_return = 0
+
+        actions = []
+        rewards = []
+        states = [torch.Tensor(obs).to(device)]
+
+        while done != True:
+            env.render()
+
+            log_probs = policy(obs)
+            m = Categorical(logits = log_probs)
+            action = m.sample()
+
+            prev_obs = torch.Tensor(obs).to(device)
+
+            obs, reward, done, info = env.step(action.item())
+
+            rewards.append(reward)
+            actions.append(action.item())
+
+            obs = torch.Tensor(obs).to(device)
+
+            states.append(obs)
+
+            final_return += reward * (gamma ** timestep)
+
+            # optimize gvf's online
+            # if episode is not ended, cumulant is 1
+            # termination factor is 0 ==> the pseudo-discount factor is 1 so we do not discount
+
+            # NOTE: this is hardcoded for cartpole
+            # TODO: have one GVF corresponding to taking an action exclusively
+
+            true_prob = torch.exp(log_probs[action.item()].detach())
+            left_prob = 1 if action.item() == 0 else 0
+            right_prob = 1 if action.item() == 1 else 0
+            random_prob = random_policy(prev_obs).detach()[action.item()]
+
+            gvf_off_policy_update(left_gvf_optim, left_gvf, 1, 0, obs, actions[-1], prev_obs, left_prob / true_prob)
+            gvf_off_policy_update(right_gvf_optim, right_gvf, 1, 0, obs, actions[-1], prev_obs, right_prob / true_prob)
+            gvf_off_policy_update(random_gvf_optim, random_gvf, 1, 0, obs, actions[-1], prev_obs, random_prob / true_prob)
+
+            timestep += 1
+
+
+        # REINFORCE
+        for i in range(len(actions)):
+            # optimize policy
+            G = 0
+            if i <= len(rewards) - 1:
+                G = sum([(gamma ** j) * rewards[j] for j in range(i, len(rewards))])
+
+            # don't need to use log since we already output logits
+            elig_vec = policy(states[i])[actions[i]] # evaluate the gradient with the current params
+
+            loss = -G * elig_vec
+            policy_optim.zero_grad()
+            if i + 1 == len(actions):
+                loss.backward()
+            else:
+                loss.backward(retain_graph = True)
+            policy_optim.step()
+    return returns
 
 def train_time_gvf(env, gamma, lr, episodes):
     dim_action = env.action_space.n
@@ -25,9 +132,13 @@ def train_time_gvf(env, gamma, lr, episodes):
     # will have to be monte carlo method, or at least that is most reliable
 
     # just use a fixed policy for now
-    # TODO: in the future find way to make this adaptive
+    # TODO: in the future find way to make this adaptive, maybe with off-policy? have a set of policies that we would like to predict
     gvf = Time_GVF(dim_state)
     gvf_optim = torch.optim.SGD(gvf.parameters(), lr = lr)
+
+    # TODO: should also try to learn off-policy predictions; this can probably help with the fact that our policy is always changing
+        # how do options fit in?
+
 
     policy = Policy(dim_state, dim_action)
     policy_optim = torch.optim.SGD(policy.parameters(), lr = lr)
@@ -39,15 +150,18 @@ def train_time_gvf(env, gamma, lr, episodes):
 
     # for assessing accuracy of gvf later
     gvf_assess = {"episode": [], "gvf_pred": [], "true_time": [], "timestep": []}
+    gvf_errors = {"episode": [], "error": []} # holds mean squared error of gvf prediction from actual time till end at a given step
 
     # for plots
     fig = plt.figure(figsize = (15, 10))
 
 
     for episode in range(episodes):
-
+        gvf_error = 0
         obs = torch.Tensor(env.reset()).to(device)
         done = False
+
+        gvf_preds = []
 
         # cumulant is timestep
         timestep = 0
@@ -64,6 +178,9 @@ def train_time_gvf(env, gamma, lr, episodes):
             gvf_assess["episode"].append(episode)
             gvf_assess["gvf_pred"].append(gvf(obs).detach().item())
             gvf_assess["timestep"].append(timestep)
+
+            gvf_preds.append(gvf(obs).detach().item())
+
 
             log_probs = policy(obs)
             m = Categorical(logits = log_probs)
@@ -86,10 +203,19 @@ def train_time_gvf(env, gamma, lr, episodes):
         gvf_assess["episode"].append(episode)
         gvf_assess["gvf_pred"].append(gvf(obs).detach().item())
         gvf_assess["timestep"].append(timestep)
+
+        gvf_preds.append(gvf(obs).detach().item())
+
+        # average squared error
+        gvf_error = np.sqrt(sum([(gvf_preds[i] - (timestep - i)) ** 2 for i in range(timestep + 1)])) / (timestep + 1)
+
+        gvf_errors["episode"].append(episode)
+        gvf_errors["error"].append(gvf_error)
+
         # REINFORCE
         for i in range(len(actions)):
             # optimize policy
-            """G = 0
+            G = 0
             if i <= len(rewards) - 1:
                 G = sum([(gamma ** j) * rewards[j] for j in range(i, len(rewards))])
 
@@ -97,19 +223,16 @@ def train_time_gvf(env, gamma, lr, episodes):
             elig_vec = policy(states[i])[actions[i]] # evaluate the gradient with the current params
 
             loss = -G * elig_vec
-            #assert np.isnan(G.detach()) == False, "G is nan"
-            #assert torch.sum(torch.isnan(elig_vec)) == 0, "elig vec is nan"
-            #assert np.isnan(loss.detach()) == False, "loss is nan"
             policy_optim.zero_grad()
             if i + 1 == len(actions):
                 loss.backward()
             else:
                 loss.backward(retain_graph = True)
-            policy_optim.step()"""
+            policy_optim.step()
 
-        # optimize GVF
+        # optimize GVFs
         # recall cumulant is just 1 at non-terminal state
-        # termination factor is 1 until we hit a terminal state, so the return is given below
+        # termination factor is 0 until we hit a terminal state, so the return is given below
         # for each state in the buffer, the return at that stage is simply len(buffer) - 1 - index of state since the terminal state is in the buffer
         cumulants = [len(states) - 1 - ix for ix in range(len(states))]
 
@@ -119,8 +242,8 @@ def train_time_gvf(env, gamma, lr, episodes):
         for i in range(len(states)):
             gvf_optim.zero_grad()
             delta = cumulants[i] - gvf(states[i]).detach()
-            loss = -delta * gvf(states[i])
-            loss.backward()
+            gvf_loss = -delta * gvf(states[i])
+            gvf_loss.backward()
             gvf_optim.step()
 
         # plot accuracy of gvf for final episode
@@ -129,10 +252,14 @@ def train_time_gvf(env, gamma, lr, episodes):
         returns.append(final_return)
 
     # show combined plots of accuracy of gvf
-    gvf_assess = pd.DataFrame(gvf_assess)
-    seaborn.lineplot(x = "timestep", y = "gvf_pred", data = gvf_assess.loc[gvf_assess["episode"] == episode - 1], label = "gvf")
-    seaborn.lineplot(x = "timestep", y = "true_time", data = gvf_assess.loc[gvf_assess["episode"] == episode - 1], label = "truth")
-    plt.show()
+    #gvf_assess = pd.DataFrame(gvf_assess)
+    #seaborn.lineplot(x = "timestep", y = "gvf_pred", data = gvf_assess.loc[gvf_assess["episode"] == episode - 1], label = "gvf")
+    #seaborn.lineplot(x = "timestep", y = "true_time", data = gvf_assess.loc[gvf_assess["episode"] == episode - 1], label = "truth")
+
+    #gvf_errors = pd.DataFrame(gvf_errors)
+    #seaborn.lineplot(x = "episode", y = "error", data = gvf_errors)
+
+    #plt.show()
     return returns
 
 
@@ -206,7 +333,7 @@ def train_gvf(env, gamma, lambda_t, episodes, lr):
             # for now, don't do eligibity traces
             #gvf_update(optim, gvf, cumulant, termination, obs, torch.Tensor([action]).to(device), prev_obs, lambda_t, prev_z)
             for i in range(dim_state):
-                gvf_update(gvf_optims[i], gvfs[i], cumulants[i], terminations[i], obs, torch.Tensor([action]).to(device), prev_obs, lambda_t, prev_z)
+                gvf_trace_update(gvf_optims[i], gvfs[i], cumulants[i], terminations[i], obs, torch.Tensor([action]).to(device), prev_obs, lambda_t, prev_z)
 
         # REINFORCE
         for i in range(len(actions)):
